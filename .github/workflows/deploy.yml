@@ -6,7 +6,7 @@ on:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       sha: ${{ steps.set-sha.outputs.sha }}
     steps:
@@ -17,24 +17,53 @@ jobs:
         run: echo "::set-output name=sha::${GITHUB_SHA}"
 
       - name: Log in to GHCR
+        # This step is still needed to authenticate for the subsequent check
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
+      # --- NEW STEP TO CHECK IMAGE EXISTENCE ---
+      - name: Check if runtime image already exists in GHCR
+        id: check_image
+        # Use a shell script to try and pull the image manifest.
+        # If it fails (404), we proceed with the build.
+        run: |
+          IMAGE_NAME=ghcr.io/vacdotcs/python-app:runtime-${{ github.sha }}
+
+          # Try to pull the manifest (no actual download) and check the exit code.
+          # podman/docker pull exits 0 if the image exists, non-zero otherwise.
+          if docker manifest inspect $IMAGE_NAME > /dev/null 2>&1; then
+            echo "Image $IMAGE_NAME found in GHCR. Skipping build and push."
+            echo "::set-output name=exists::true"
+          else
+            echo "Image $IMAGE_NAME not found. Proceeding with build."
+            echo "::set-output name=exists::false"
+          fi
+        # We need to explicitly allow this step to fail if the image isn't found
+        # (though `docker manifest inspect` usually handles the exit code cleanly)
+        # We use a custom action output (`::set-output name=exists::...`)
+        # NOTE: If using Podman, the command is similar: podman manifest inspect
+        shell: bash
+
+      # --- CONDITIONAL BUILD & PUSH STEPS ---
+
       - name: Build and push test image
+        # This job only runs IF the previous 'check_image' step output is 'false'
+        if: steps.check_image.outputs.exists == 'false'
         run: |
           IMAGE_TEST=ghcr.io/vacdotcs/python-app:test-${{ github.sha }}
           docker build --target test -t $IMAGE_TEST .
           docker push $IMAGE_TEST
 
       - name: Build and push runtime image
+        # This job only runs IF the previous 'check_image' step output is 'false'
+        if: steps.check_image.outputs.exists == 'false'
         run: |
           IMAGE_RUNTIME=ghcr.io/vacdotcs/python-app:runtime-${{ github.sha }}
           docker build --target runtime -t $IMAGE_RUNTIME .
           docker push $IMAGE_RUNTIME
-
   test:
     runs-on: self-hosted
     needs: build-and-push
