@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-and-push:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.set-sha.outputs.sha }}
       owner_lc: ${{ steps.lower_owner.outputs.owner_lc }}
@@ -34,26 +34,20 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
-        id: check_image
         run: |
           OWNER_LC="${{ steps.lower_owner.outputs.owner_lc }}"
           IMAGE_BASE="ghcr.io/${OWNER_LC}/python-app"
-          IMAGE_RUNTIME="${IMAGE_BASE}:runtime-${{ github.sha }}"
-          IMAGE_TEST="${IMAGE_BASE}:test-${{ github.sha }}"
 
-          if docker manifest inspect $IMAGE_RUNTIME > /dev/null 2>&1; then
-            echo "Image exists. Skipping build."
-          else
-            docker build --target test -t $IMAGE_TEST .
-            docker push $IMAGE_TEST
+          # Сборка и пуш
+          docker build --target test -t "${IMAGE_BASE}:test-${{ github.sha }}" .
+          docker push "${IMAGE_BASE}:test-${{ github.sha }}"
 
-            docker build --target runtime -t $IMAGE_RUNTIME .
-            docker push $IMAGE_RUNTIME
-          fi
+          docker build --target runtime -t "${IMAGE_BASE}:runtime-${{ github.sha }}" .
+          docker push "${IMAGE_BASE}:runtime-${{ github.sha }}"
         shell: bash
 
   test:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: build-and-push
     steps:
       - name: Runs tests via SSH
@@ -73,7 +67,7 @@ jobs:
             podman rmi $IMAGE_TEST || true
 
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: [build-and-push, test]
     steps:
       - name: Deploy runtime image via SSH
@@ -95,7 +89,6 @@ jobs:
 
             podman run --replace -d --name python-app --network host -p 8064:8064 $IMAGE_RUNTIME
 
-            # Очистка старых образов
             podman images --format "{{.Repository}}:{{.Tag}}" \
             | grep "ghcr.io/${OWNER_LC}/python-app:runtime-" \
             | grep -v "${{ github.sha }}" \
