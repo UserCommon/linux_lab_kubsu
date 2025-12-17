@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
 
-# Добавляем права на запись в Packages
 permissions:
   contents: read
   packages: write
@@ -14,6 +13,7 @@ jobs:
     runs-on: self-hosted
     outputs:
       sha: ${{ steps.set-sha.outputs.sha }}
+      exists: ${{ steps.check_image.outputs.exists }}
     steps:
       - uses: actions/checkout@v3
 
@@ -26,39 +26,37 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          # Используем системный токен, у которого теперь есть права через permissions
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if runtime image already exists in GHCR
+      - name: Check and Build
         id: check_image
         run: |
-          IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/python-app:runtime-${{ github.sha }}
-          if docker manifest inspect $IMAGE_NAME > /dev/null 2>&1; then
-            echo "Image $IMAGE_NAME found. Skipping build."
+          # Переводим логин в нижний регистр для Docker
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_BASE="ghcr.io/${OWNER_LC}/python-app"
+          IMAGE_RUNTIME="${IMAGE_BASE}:runtime-${{ github.sha }}"
+          IMAGE_TEST="${IMAGE_BASE}:test-${{ github.sha }}"
+
+          if docker manifest inspect $IMAGE_RUNTIME > /dev/null 2>&1; then
+            echo "Image exists. Skipping build."
             echo "exists=true" >> $GITHUB_OUTPUT
           else
-            echo "Image $IMAGE_NAME not found. Proceeding."
             echo "exists=false" >> $GITHUB_OUTPUT
+
+            # Сборка и пуш теста
+            docker build --target test -t $IMAGE_TEST .
+            docker push $IMAGE_TEST
+
+            # Сборка и пуш рантайма
+            docker build --target runtime -t $IMAGE_RUNTIME .
+            docker push $IMAGE_RUNTIME
           fi
         shell: bash
-
-      - name: Build and push test image
-        if: steps.check_image.outputs.exists == 'false'
-        run: |
-          IMAGE_TEST=ghcr.io/${{ github.repository_owner }}/python-app:test-${{ github.sha }}
-          docker build --target test -t $IMAGE_TEST .
-          docker push $IMAGE_TEST
-
-      - name: Build and push runtime image
-        if: steps.check_image.outputs.exists == 'false'
-        run: |
-          IMAGE_RUNTIME=ghcr.io/${{ github.repository_owner }}/python-app:runtime-${{ github.sha }}
-          docker build --target runtime -t $IMAGE_RUNTIME .
-          docker push $IMAGE_RUNTIME
 
   test:
     runs-on: self-hosted
     needs: build-and-push
+    # Запускаем только если билд прошел (или был скипнут, но имидж есть)
     steps:
       - name: Runs tests via SSH
         uses: appleboy/ssh-action@v1.0.0
@@ -69,35 +67,4 @@ jobs:
           port: ${{ secrets.SERVER_SSH_PORT }}
           script: |
             set -e
-            IMAGE_TEST=ghcr.io/${{ github.repository_owner }}/python-app:test-${{ github.sha }}
-            podman login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-            podman run --rm --name python-app-test --network host $IMAGE_TEST python -m pytest -v tests
-            podman rmi $IMAGE_TEST || true
-
-  deploy:
-    runs-on: self-hosted
-    needs: test
-    steps:
-      - name: Deploy runtime image via SSH
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_SSH_PORT }}
-          script: |
-            set -e
-            IMAGE_RUNTIME=ghcr.io/${{ github.repository_owner }}/python-app:runtime-${{ github.sha }}
-
-            podman login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-            podman stop python-app || true
-            podman rm -f python-app || true
-
-            # Запуск нового контейнера
-            podman run --replace -d --name python-app --network host -p 8064:8064 $IMAGE_RUNTIME
-
-            # Очистка старых имиджей
-            podman images --format "{{.Repository}}:{{.Tag}}" \
-            | grep "ghcr.io/${{ github.repository_owner }}/python-app:runtime-" \
-            | grep -v "${{ github.sha }}" \
-            | xargs -r podman rmi -f || true
+            OWNER_LC=$(echo "${{ github.repository_owner
